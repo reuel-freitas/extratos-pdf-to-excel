@@ -1,0 +1,130 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: #f0f2f5;
+  color: #1a1a1a;
+  min-height: 100vh;
+}
+
+header {
+  background: linear-gradient(135deg, #1a365d, #2b6cb0);
+  color: white;
+  padding: 20px 32px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+header svg { flex-shrink: 0; }
+header h1 { font-size: 20px; font-weight: 600; }
+header p  { font-size: 13px; opacity: 0.85; margin-top: 2px; }
+
+.container { max-width: 1100px; margin: 32px auto; padding: 0 24px; }
+
+#drop-zone {
+  border: 2.5px dashed #90cdf4;
+  border-radius: 12px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: white;
+}
+#drop-zone:hover, #drop-zone.dragover { border-color: #2b6cb0; background: #ebf8ff; }
+#drop-zone svg { margin-bottom: 12px; }
+#drop-zone .main-text { font-size: 17px; font-weight: 500; color: #333; }
+#drop-zone .sub-text  { font-size: 13px; color: #888; margin-top: 6px; }
+#file-input { display: none; }
+
+.bank-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #ebf8ff;
+  border: 1px solid #90cdf4;
+  border-radius: 20px;
+  padding: 5px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #2b6cb0;
+  margin-top: 16px;
+}
+
+#info-bar {
+  display: none;
+  background: #ebf8ff;
+  border: 1px solid #90cdf4;
+  border-radius: 8px;
+  padding: 14px 20px;
+  margin-top: 12px;
+  font-size: 14px;
+  color: #2b6cb0;
+}
+#info-bar strong { font-weight: 600; }
+
+#warn-bar {
+  display: none;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  padding: 14px 20px;
+  margin-top: 12px;
+  font-size: 13px;
+  color: #92400e;
+}
+
+#error-bar {
+  display: none;
+  background: #fbe9e7;
+  border: 1px solid #ef9a9a;
+  border-radius: 8px;
+  padding: 14px 20px;
+  margin-top: 20px;
+  font-size: 14px;
+  color: #c62828;
+}
+
+#table-wrapper {
+  display: none;
+  margin-top: 24px;
+  background: white;
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.08);
+}
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+thead { background: #2b6cb0; color: white; }
+th {
+  padding: 12px 16px; text-align: left;
+  font-weight: 600; font-size: 12.5px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+th:nth-child(3), th:nth-child(4), th:nth-child(5) { text-align: right; }
+td { padding: 10px 16px; border-bottom: 1px solid #eee; }
+td:nth-child(3), td:nth-child(4), td:nth-child(5) { text-align: right; font-variant-numeric: tabular-nums; }
+tr:hover td { background: #f7fafc; }
+.val-positive { color: #2e7d32; font-weight: 500; }
+.val-negative { color: #c62828; font-weight: 500; }
+.code-525     { color: #555; font-weight: 500; }
+
+.actions { display: none; margin-top: 20px; gap: 12px; flex-wrap: wrap; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 12px 24px; border: none; border-radius: 8px;
+  font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+}
+.btn-primary   { background: #2b6cb0; color: white; }
+.btn-primary:hover   { background: #2c5282; }
+.btn-secondary { background: white; color: #333; border: 1px solid #ccc; }
+.btn-secondary:hover { background: #f5f5f5; }
+
+#loading { display: none; text-align: center; padding: 32px; color: #666; }
+.spinner {
+  display: inline-block; width: 28px; height: 28px;
+  border: 3px solid #ddd; border-top-color: #2b6cb0;
+  border-radius: 50%; animation: spin 0.7s linear infinite; margin-bottom: 10px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+footer { text-align: center; padding: 24px; font-size: 12px; color: #999; margin-top: 40px; }
