@@ -39,7 +39,7 @@ async function processFile(file) {
   try {
     const text = await extractText(new Uint8Array(await file.arrayBuffer()));
     const bank = detectBank(text);
-    const result = parseTransactions(text);
+    const result = parseTransactions(text, bank);
     currentTransactions = result.transactions;
 
     if (currentTransactions.length === 0) {

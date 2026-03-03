@@ -19,6 +19,7 @@ function detectBank(text) {
   if (header.includes('SICOOB') || header.includes('SISBR'))        return 'sicoob';
   if (header.includes('SICREDI'))                                    return 'sicredi';
   if (header.includes('BRADESCO'))                                   return 'bradesco';
+  if (header.includes('DCTO.') && (header.includes('CRÉDITO') || header.includes('CREDITO'))) return 'bradesco';
   if (/ITA[ÚU]/.test(header))                                       return 'itau';
   if (header.includes('SALDO DISPONÍVEL EM CONTA') || header.includes('SALDO DISPONIVEL EM CONTA') ||
       header.includes('LIMITE DA CONTA CONTRATADO') ||
@@ -51,8 +52,13 @@ function normalizeText(text) {
 }
 
 function isBalanceLine(desc) {
-  return /\bSALDO\s+(ANTERIOR|TOTAL|FINAL|INICIAL)/i.test(desc) ||
-         /\bSALDO\s+TOTAL\s+DISPON/i.test(desc);
+  const d = desc.trim();
+  return /\bSALDO\s+(ANTERIOR|TOTAL|FINAL|INICIAL|DO\s+DIA|ATUAL)/i.test(d) ||
+         /\bSALDO\s+TOTAL\s+DISPON/i.test(d) ||
+         /^SALDO\b/i.test(d) ||
+         /^(Entradas?:|Sa[íi]das?:)/i.test(d) ||
+         /Saldo\s+(inicial|final)\s*:/i.test(d) ||
+         /^DETALHE\s+DOS\s+MOVIMENTOS/i.test(d);
 }
 
 function trimAtSummary(text) {
@@ -160,6 +166,8 @@ function parseGenericFormat(transText, period) {
 
     const detail = seg.substring(m[0].length)
       .replace(/DOC\.?:\s*\S*/gi, '').replace(/NR\.?:\s*\S*/gi, '')
+      .replace(/^\s*-?\d{1,3}(?:\.\d{3})*,\d{2}\s*/g, '') // remove saldo no início do detail
+      .replace(/\s*-?\d{1,3}(?:\.\d{3})*,\d{2}\s*$/g, '') // remove saldo no fim do detail
       .replace(/\s+/g, ' ').trim();
 
     transactions.push({
@@ -208,10 +216,96 @@ function parseRsColumnFormat(text) {
   return transactions.length > 0 ? transactions : null;
 }
 
-function parseTransactions(text) {
+function parseBradesco(text) {
+  const lines = text.split('\n');
+  const transactions = [];
+  let currentDate = null;
+  let hadInferredSign = false;
+
+  const moneyRe = /(-?\d{1,3}(?:\.\d{3})*,\d{2})/g;
+  const valueLineRe = /\b\d{4,8}\s{3,}-?\d{1,3}(?:\.\d{3})*,\d{2}/;
+
+  const isDescLine = (line) => {
+    const t = line.trim();
+    if (!t) return false;
+    if (valueLineRe.test(line)) return false;
+    if (/^(Data\b|Ag[eê]ncia|Extrato\s+de|Folha\s+\d|Nome\s+do|CNPJ|Total\s+Disp)/i.test(t)) return false;
+    if (/Crédito\s*\(R\$\)|Débito\s*\(R\$\)|Dcto\./i.test(t)) return false;
+    if (/\bSALDO\s+(ANTERIOR|TOTAL|FINAL|INICIAL)\b/i.test(t)) return false;
+    return true;
+  };
+
+  const inlineDesc = (line) =>
+    line.replace(/^(\d{2}\/\d{2}\/\d{4})?\s+/, '')
+        .replace(/\b\d{4,8}\s{3,}.*$/, '')
+        .trim();
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    const dateMatch = line.match(/^(\d{2}\/\d{2}\/\d{4})/);
+    if (dateMatch) currentDate = dateMatch[1];
+
+    if (!valueLineRe.test(line)) continue;
+
+    const moneys = [...line.matchAll(moneyRe)];
+    if (moneys.length < 2) continue;
+    if (!currentDate) continue;
+
+    const txRaw   = moneys[0][1];
+    const txValue = parseBR(txRaw);
+
+    const parts = [];
+
+    const prevLine = lines[i - 1] ?? '';
+    if (isDescLine(prevLine) && !/^\s*(REM:|DES:)/i.test(prevLine)) {
+      const text = prevLine.trim().replace(/^\d{2}\/\d{2}\/\d{4}\s+/, '');
+      if (text) parts.push(text);
+    }
+
+    const inline = inlineDesc(line);
+    if (inline) parts.push(inline);
+
+    const nextLine      = lines[i + 1] ?? '';
+    const lineAfterNext = lines[i + 2] ?? '';
+    const nextIsValue   = valueLineRe.test(lineAfterNext);
+    if (isDescLine(nextLine) && (!nextIsValue || /^\s*(REM:|DES:)/i.test(nextLine))) {
+      parts.push(nextLine.trim());
+    }
+
+    const description = parts.join(' ').replace(/\s+/g, ' ').trim() || 'Transação';
+    if (isBalanceLine(description)) continue;
+
+    const [dayS, monthS, yearS] = currentDate.split('/');
+    const day = +dayS, month = +monthS, year = +yearS;
+    if (day < 1 || day > 31 || month < 1 || month > 12) continue;
+
+    let signedValue;
+    if (txRaw.startsWith('-')) {
+      signedValue = txValue;
+    } else {
+      const { sign, inferred } = resolveSign(null, txRaw, description);
+      signedValue = sign * Math.abs(txValue);
+      if (inferred) hadInferredSign = true;
+    }
+
+    transactions.push({
+      date: `${String(day).padStart(2,'0')}/${String(month).padStart(2,'0')}/${year}`,
+      description,
+      value: signedValue,
+    });
+  }
+
+  return { transactions, hadInferredSign };
+}
+
+function parseTransactions(text, bank = detectBank(text)) {
   const normalized = normalizeText(text);
-  const period     = extractPeriod(normalized);
-  const transText  = trimAtSummary(normalized);
+
+  if (bank === 'bradesco') return parseBradesco(normalized);
+
+  const period    = extractPeriod(normalized);
+  const transText = trimAtSummary(normalized);
 
   const result = parseGenericFormat(transText, period);
 
@@ -237,19 +331,19 @@ for (const pdf of pdfs) {
 
   let raw;
   try {
-    // No -layout flag: closer to how PDF.js concatenates text items
-    raw = execSync(`pdftotext "${path}" -`, { maxBuffer: 10 * 1024 * 1024 }).toString();
+    // -layout preserves column positions — aproxima o novo extractText baseado em coordenadas
+    raw = execSync(`pdftotext -layout "${path}" -`, { maxBuffer: 10 * 1024 * 1024 }).toString();
   } catch (e) {
     console.log(`  ${R}✗ Erro ao extrair texto: ${e.message}${X}`);
     fail++; continue;
   }
 
-  // Join lines with a space, simulating PDF.js item concatenation
-  const text = raw.split('\n').map(l => l.trim()).filter(Boolean).join(' ');
+  // Mantém newlines para preservar estrutura de linhas (novo comportamento do PDF.js)
+  const text = raw;
 
   const bank  = detectBank(text);
   const label = BANK_NAMES[bank] ?? 'Desconhecido';
-  const { transactions, hadInferredSign } = parseTransactions(text);
+  const { transactions, hadInferredSign } = parseTransactions(text, bank);
 
   const fmtBR = n => n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const totalC = transactions.filter(t => t.value > 0).reduce((s, t) => s + t.value, 0);

@@ -5,11 +5,32 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 export async function extractText(data) {
   const doc = await pdfjsLib.getDocument({ data }).promise;
   let fullText = '';
+
   for (let i = 1; i <= doc.numPages; i++) {
     const page = await doc.getPage(i);
     const content = await page.getTextContent();
-    fullText += content.items.map(item => item.str).join(' ') + ' ';
+
+    // Group text items by Y coordinate (within 3px tolerance = same line)
+    const rows = [];
+    for (const item of content.items) {
+      if (!item.str.trim()) continue;
+      const y = item.transform[5];
+      const x = item.transform[4];
+      let row = rows.find(r => Math.abs(r.y - y) < 3);
+      if (!row) { row = { y, items: [] }; rows.push(row); }
+      row.items.push({ x, str: item.str });
+    }
+
+    // Sort rows top-to-bottom (PDF Y-axis is bottom-up)
+    rows.sort((a, b) => b.y - a.y);
+
+    for (const row of rows) {
+      row.items.sort((a, b) => a.x - b.x);
+      fullText += row.items.map(i => i.str).join(' ') + '\n';
+    }
+    fullText += '\n';
   }
+
   return fullText;
 }
 
@@ -41,7 +62,9 @@ export function detectBank(text) {
 
   if (header.includes('SICOOB') || header.includes('SISBR'))        return 'sicoob';
   if (header.includes('SICREDI'))                                    return 'sicredi';
+  // Bradesco: nome nem sempre aparece no texto (pode ser imagem); usar assinatura de formato
   if (header.includes('BRADESCO'))                                   return 'bradesco';
+  if (header.includes('DCTO.') && (header.includes('CRÉDITO') || header.includes('CREDITO'))) return 'bradesco';
   if (/ITA[ÚU]/.test(header))                                       return 'itau';
   // Itaú format signature (bank name often in logo only, not in PDF text)
   if (header.includes('SALDO DISPONÍVEL EM CONTA') || header.includes('SALDO DISPONIVEL EM CONTA') ||
@@ -61,10 +84,13 @@ export function detectBank(text) {
 }
 
 // Transaction parsing
-export function parseTransactions(text) {
+export function parseTransactions(text, bank = detectBank(text)) {
   const normalized = normalizeText(text);
-  const period     = extractPeriod(normalized);
-  const transText  = trimAtSummary(normalized);
+
+  if (bank === 'bradesco') return parseBradesco(normalized);
+
+  const period    = extractPeriod(normalized);
+  const transText = trimAtSummary(normalized);
 
   const result = parseGenericFormat(transText, period);
 
@@ -139,6 +165,8 @@ function parseGenericFormat(transText, period) {
     const detail = seg.substring(match[0].length)
       .replace(/DOC\.?:\s*\S*/gi, '')
       .replace(/NR\.?:\s*\S*/gi, '')
+      .replace(/^\s*-?\d{1,3}(?:\.\d{3})*,\d{2}\s*/g, '') // remove saldo no início do detail
+      .replace(/\s*-?\d{1,3}(?:\.\d{3})*,\d{2}\s*$/g, '') // remove saldo no fim do detail
       .replace(/\s+/g, ' ')
       .trim();
 
@@ -217,11 +245,124 @@ function parseRsColumnFormat(text) {
   return transactions.length > 0 ? transactions : null;
 }
 
+// ── Private: Bradesco-specific parser ────────────────────────────────────────
+//
+// Bradesco layout (pdftotext -layout / PDF.js coordenadas):
+//
+//   [pre-desc linha]          <- texto puro, sem data nem valores
+//   [DATA]  [espaços]  [DOCTO]  [CRÉDITO ou DÉBITO]  [SALDO]  <- linha de valores
+//   [post-desc linha]         <- continuação (REM:, DES:, CONTR, etc.)
+//
+// A descrição é construída a partir das linhas de texto ao redor da linha de valores.
+
+function parseBradesco(text) {
+  const lines = text.split('\n');
+  const transactions = [];
+  let currentDate = null;
+  let hadInferredSign = false;
+
+  const moneyRe = /(-?\d{1,3}(?:\.\d{3})*,\d{2})/g;
+
+  // "Linha de valores": número de docto (4–8 dígitos) seguido de 3+ espaços e valor monetário
+  // Funciona mesmo quando há texto antes do docto (ex: "RENILDA RAMOS COSTA DOS SANTOS   1822393   1.900,00")
+  const valueLineRe = /\b\d{4,8}\s{3,}-?\d{1,3}(?:\.\d{3})*,\d{2}/;
+
+  const isDescLine = (line) => {
+    const t = line.trim();
+    if (!t) return false;
+    if (valueLineRe.test(line)) return false;
+    if (/^(Data\b|Ag[eê]ncia|Extrato\s+de|Folha\s+\d|Nome\s+do|CNPJ|Total\s+Disp)/i.test(t)) return false;
+    if (/Crédito\s*\(R\$\)|Débito\s*\(R\$\)|Dcto\./i.test(t)) return false;
+    if (/\bSALDO\s+(ANTERIOR|TOTAL|FINAL|INICIAL)\b/i.test(t)) return false;
+    return true;
+  };
+
+  // Extrai texto da "coluna Lançamento" dentro da própria linha de valores (antes do docto)
+  const inlineDesc = (line) =>
+    line.replace(/^(\d{2}\/\d{2}\/\d{4})?\s+/, '')  // remove data inicial
+        .replace(/\b\d{4,8}\s{3,}.*$/, '')           // remove a partir do docto
+        .trim();
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // Atualiza data corrente
+    const dateMatch = line.match(/^(\d{2}\/\d{2}\/\d{4})/);
+    if (dateMatch) currentDate = dateMatch[1];
+
+    if (!valueLineRe.test(line)) continue;
+
+    const moneys = [...line.matchAll(moneyRe)];
+    if (moneys.length < 2) continue; // precisa de valor de tx + saldo
+    if (!currentDate) continue;
+
+    // Primeiro valor = transação; último = saldo (ignorar)
+    const txRaw   = moneys[0][1];
+    const txValue = parseBrazilianNumber(txRaw);
+
+    const parts = [];
+
+    // Pré-descrição: exatamente 1 linha antes, somente se NÃO for REM:/DES: (que seria pós-desc do tx anterior)
+    const prevLine = lines[i - 1] ?? '';
+    if (isDescLine(prevLine) && !/^\s*(REM:|DES:)/i.test(prevLine)) {
+      // Linha pode ter data + texto (ex: "12/01/2024  ESTORNO DE LANCAMENTO*")
+      const text = prevLine.trim().replace(/^\d{2}\/\d{2}\/\d{4}\s+/, '');
+      if (text) parts.push(text);
+    }
+
+    // Texto embutido na própria linha de valores (coluna Lançamento antes do docto)
+    const inline = inlineDesc(line);
+    if (inline) parts.push(inline);
+
+    // Pós-descrição: 1 linha depois
+    // Se a linha seguinte for outra linha de valores, só inclui se esta for REM:/DES:
+    // (senão seria pré-desc do próximo tx, ex: "TRANSFERENCIA PIX")
+    const nextLine      = lines[i + 1] ?? '';
+    const lineAfterNext = lines[i + 2] ?? '';
+    const nextIsValue   = valueLineRe.test(lineAfterNext);
+    if (isDescLine(nextLine) && (!nextIsValue || /^\s*(REM:|DES:)/i.test(nextLine))) {
+      parts.push(nextLine.trim());
+    }
+
+    const description = parts.join(' ').replace(/\s+/g, ' ').trim() || 'Transação';
+    if (isBalanceLine(description)) continue;
+
+    const [dayS, monthS, yearS] = currentDate.split('/');
+    const day = +dayS, month = +monthS, year = +yearS;
+    if (day < 1 || day > 31 || month < 1 || month > 12) continue;
+
+    let signedValue;
+    if (txRaw.startsWith('-')) {
+      signedValue = txValue;
+    } else {
+      const { sign, inferred } = resolveSign(null, txRaw, description);
+      signedValue = sign * Math.abs(txValue);
+      if (inferred) hadInferredSign = true;
+    }
+
+    transactions.push({
+      day, month, year,
+      excelDate:    dateToExcelSerial(year, month, day),
+      description,
+      value:        signedValue,
+      col525credit: signedValue > 0 ? 525 : null,
+      col525debit:  signedValue < 0 ? 525 : null,
+    });
+  }
+
+  return { transactions, hadInferredSign };
+}
+
 // ── Private: helpers ─────────────────────────────────────────────────────────
 
 function isBalanceLine(description) {
-  return /\bSALDO\s+(ANTERIOR|TOTAL|FINAL|INICIAL)/i.test(description) ||
-         /\bSALDO\s+TOTAL\s+DISPON/i.test(description);
+  const d = description.trim();
+  return /\bSALDO\s+(ANTERIOR|TOTAL|FINAL|INICIAL|DO\s+DIA|ATUAL)/i.test(d) ||
+         /\bSALDO\s+TOTAL\s+DISPON/i.test(d) ||
+         /^SALDO\b/i.test(d) ||                               // linha que começa com "Saldo"
+         /^(Entradas?:|Sa[íi]das?:)/i.test(d) ||             // resumo de entradas/saídas
+         /Saldo\s+(inicial|final)\s*:/i.test(d) ||            // sumário de saldo inicial/final
+         /^DETALHE\s+DOS\s+MOVIMENTOS/i.test(d);             // cabeçalho de seção
 }
 
 function trimAtSummary(text) {
